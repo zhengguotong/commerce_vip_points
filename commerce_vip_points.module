@@ -6,7 +6,7 @@
 function commerce_vip_points_menu(){
     $items = array();
 
-    $items['admin/commerce/commercece-vip-points'] = array(
+    $items['admin/commerce/userpoints/settings'] = array(
         'title' => t('会员积分奖金比例设置'),
         'description' => t('会员积分奖金比例设置'),
         'page callback' => 'drupal_get_form',
@@ -16,7 +16,7 @@ function commerce_vip_points_menu(){
         'type' => MENU_NORMAL_ITEM,
     );
 
-    $items['admin/userpoints/update-user-cashback'] = array(
+    $items['admin/commerce/userpoints/update-user-cashback'] = array(
         'title' => t('更新会员本月奖金'),
         'description' =>  t('更新会员本月奖金'),
         'page callback' => 'drupal_get_form',
@@ -26,7 +26,7 @@ function commerce_vip_points_menu(){
         'type' => MENU_NORMAL_ITEM,
     );
 
-    $items['admin/commerce/userpoints-summary'] = array(
+    $items['admin/commerce/userpoints/summary'] = array(
         'title' => t('会员积分统计'),
         'description' => t('会员积分统计'),
         'page callback' => 'drupal_get_form',
@@ -34,6 +34,16 @@ function commerce_vip_points_menu(){
         'file' =>  'commerce_vip_points.summary.inc',
         'access arguments' => array('administer commerce vip setting'),
         'type' => MENU_NORMAL_ITEM,
+    );
+
+    $items['user/%user/cashback'] = array(
+        'title' => t('我的会员返现统计'),
+        'description' => t('我的会员返现奖金'),
+        'page callback' => 'drupal_get_form',
+        'page arguments' => array('commerce_vip_points_user_summary_page'),
+        'file' =>  'commerce_vip_points.user.summary.inc',
+        'access arguments' => array('view own vip points'),
+        'type' => MENU_LOCAL_TASK,
     );
 
     return $items;
@@ -47,6 +57,10 @@ function commerce_vip_points_permission(){
         'administer commerce vip setting' => array(
             'title' => t('Administer commerce vip setting'),
             'description' => t('Administer commerce vip setting.'),
+        ),
+        'view own vip points' => array(
+            'title' => t('view own vip points'),
+            'description' => t('view own vip points summary'),
         ),
     );
 }
@@ -141,7 +155,7 @@ function commerce_vip_points_update_user_cashback_form_submit($form, &$form_stat
 
     $batch = commerce_vip_points_batch_job($form_state['values']['cashback_date']) ;
     batch_set($batch);
-    $form_state['redirect']  = 'admin/commerce/userpoints-summary';
+    $form_state['redirect']  = 'admin/commerce/userpoints/summary';
 }
 
 
@@ -334,9 +348,6 @@ function  commerce_vip_points_update_user_cashback(){
     }
     watchdog('commerce_vip_points','finshed update user cashback',null,WATCHDOG_INFO);
 }
-
-
-
 
 /**
  * add user team point for given user all parents using recursion
