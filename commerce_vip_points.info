@@ -1,0 +1,11 @@
+name = commerce vip points
+description = intergrate with userpoints and commerce
+core = 7.x
+
+dependencies[] = userpoints
+dependencies[] = commerce
+dependencies[] = commerce_cart
+dependencies[] = elysia_cron
+
+files[] = commerce_vip_points.admin.inc
+files[] = commerce_vip_points.batch.inc

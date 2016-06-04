@@ -1,0 +1,498 @@
+<?php
+
+/**
+ * Implements hook_menu().
+ */
+function commerce_vip_points_menu(){
+    $items = array();
+
+    $items['admin/commerce/commercece-vip-points'] = array(
+        'title' => t('会员积分奖金比例设置'),
+        'description' => t('会员积分奖金比例设置'),
+        'page callback' => 'drupal_get_form',
+        'page arguments' => array('commerce_vip_points_setting_page'),
+        'file' =>  'commerce_vip_points.admin.inc',
+        'access arguments' => array('administer commerce vip setting'),
+        'type' => MENU_NORMAL_ITEM,
+    );
+
+    $items['admin/userpoints/update-user-cashback'] = array(
+        'title' => t('更新会员本月奖金'),
+        'description' =>  t('更新会员本月奖金'),
+        'page callback' => 'drupal_get_form',
+        'page arguments' => array('commerce_vip_points_update_user_cashback_form'),
+        'files' => 'commerce_vip_points.batch.inc',
+        'access arguments' =>  array('administer commerce vip setting'),
+        'type' => MENU_NORMAL_ITEM,
+    );
+
+    $items['admin/commerce/userpoints-summary'] = array(
+        'title' => t('会员积分统计'),
+        'description' => t('会员积分统计'),
+        'page callback' => 'drupal_get_form',
+        'page arguments' => array('commerce_vip_points_summary_page'),
+        'file' =>  'commerce_vip_points.summary.inc',
+        'access arguments' => array('administer commerce vip setting'),
+        'type' => MENU_NORMAL_ITEM,
+    );
+
+    return $items;
+}
+
+/**
+ * Implements hook_permission().
+ */
+function commerce_vip_points_permission(){
+    return array(
+        'administer commerce vip setting' => array(
+            'title' => t('Administer commerce vip setting'),
+            'description' => t('Administer commerce vip setting.'),
+        ),
+    );
+}
+
+/**
+ * implement hook_commerce_cart_order_refresh
+ * @param $order_wrapper
+ */
+function commerce_vip_points_commerce_cart_order_refresh($order_wrapper){
+
+    $uid = $order_wrapper->uid->value();
+    $user = user_load($uid);
+
+    if(in_array('会员', $user->roles)){
+        $total_vip_point = 0;
+        foreach ($order_wrapper->commerce_line_items as $line_item_wrapper) {
+            // line item type
+            $line_item_type = $line_item_wrapper->type->value();
+
+            // for product line items:
+            if ($line_item_type == 'product') {
+                $line_item_quantity = $line_item_wrapper->quantity->value();
+                $unit_vip_points  = $line_item_wrapper->commerce_product->field_product_bv->value();
+                $vip_point = $line_item_quantity *  $unit_vip_points;
+                $line_item_wrapper->field_line_item_vip_point->set($vip_point);
+                $total_vip_point += $vip_point;
+            }
+        }
+        $order_wrapper->field_order_total_vip_point->set($total_vip_point);
+    }
+}
+
+/***
+ * implements hook_commerce_checkout_complete
+ *
+ * @param $order
+ */
+function commerce_vip_points_commerce_checkout_complete($order){
+    $uid = $order->uid;
+    $user = user_load($uid);
+
+    if(in_array('会员', $user->roles)){
+        $description =  t($user->name . ' 订单' . ' ' . $order->order_id );
+        $points = $order->field_order_total_vip_point['und'][0]['value'];
+
+        //add personal points
+        $params = array (
+            'uid' =>  $uid,
+            'points' => $points,
+            'tid' => 14 ,//hardcode ,need to change this later 个人积分
+            'description' => $description,
+        );
+        userpoints_userpointsapi($params);
+
+        //add team points
+        $params = array (
+            'uid' =>  $uid,
+            'points' => $points,
+            'tid' => 15 ,//hardcode ,need to change this later 团队积分
+            'description' => $description,
+        );
+        userpoints_userpointsapi($params);
+
+        if(!empty( $user->field_parent_user)) {
+            _commerce_vip_points_add_parent_points($user,$description,$points);
+        }
+    }
+}
+
+function commerce_vip_points_update_user_cashback_form(){
+
+    $form['cashback_date']= array(
+        '#title' => t('选择更新哪一个月份的会员奖金'),
+        '#type' => 'date_popup',
+        '#required' => TRUE,
+        '#default_value' => date('Y-m'),
+        '#date_format' => 'Y-m',
+    );
+
+    $form['submit'] = array(
+        '#type' => 'submit',
+        '#value' => t('手动更新会员奖金'),
+    );
+
+    return $form;
+}
+
+function commerce_vip_points_update_user_cashback_form_submit($form, &$form_state){
+
+    // Reset counter for debug information.
+    $_SESSION['http_request_count'] = 0;
+
+    $batch = commerce_vip_points_batch_job($form_state['values']['cashback_date']) ;
+    batch_set($batch);
+    $form_state['redirect']  = 'admin/commerce/userpoints-summary';
+}
+
+
+function commerce_vip_points_batch_job($month){
+    $users = _commerce_vip_points_lowest_user_by_role('会员');
+
+    foreach ($users as $user) {
+        $operations[] = array(
+            'commerce_vip_points_batch_operation',
+            array(
+                $user,
+                $users,
+                $month,
+            ),
+        );
+    }
+    $batch = array(
+        'operations' => $operations,
+        'finished' => 'commerce_vip_points_batch_finished',
+    );
+    return $batch;
+}
+
+/**
+ * update user cashback point batch job operation callback
+ *
+ * @param $user
+ * @param $context
+ */
+function commerce_vip_points_batch_operation($user,$users,$month,&$context){
+    $context['results'][] = $user->uid . ' : ' . check_plain($user->name);
+    $context['message'] = t('更新会员 "@name"', array('@name' => $user->name)) ;
+    commerce_vip_update_cashback($user,$users,$month);
+    _commerce_vip_points_update_http_requests();
+}
+
+/**
+ * update user cashback point batch job finish callback
+ * @param $success
+ * @param $results
+ * @param $operations
+ */
+function commerce_vip_points_batch_finished($success, $results, $operations) {
+    if ($success) {
+        $message = t('总共更新了@count位会员奖金信息', array('@count' => count($results)));
+        drupal_set_message($message);
+        watchdog('commerce_vip_points',$message,null,WATCHDOG_INFO);
+    }
+    else {
+        // An error occurred.
+        // $operations contains the operations that remained unprocessed.
+        $error_operation = reset($operations);
+        drupal_set_message(
+            t('An error occurred while processing @operation with arguments : @args',
+                array(
+                    '@operation' => $error_operation[0],
+                    '@args' => print_r($error_operation[0], TRUE),
+                )
+            ),
+            'error'
+        );
+    }
+}
+
+function commerce_vip_update_cashback($user,$users,$month){
+    $hasExtralCashback = false;
+    $numberExtralCashback = 0;
+    $userpoints = _commerce_vip_points_get_user_points($user->uid,$month);
+    $cashback = commerce_vip_get_cashback($user,$users,$userpoints,$hasExtralCashback,$month,$numberExtralCashback);
+    $current_cashback = $user->field_cashback_points;
+
+    if(!empty($current_cashback)){ //update exist collection
+       $cashback_collection =  _commerce_vip_points_get_month($current_cashback['und'],$month);
+        if($cashback_collection != null) {
+            $cashback_collection->field_total_cashback['und'][0]['value'] = $cashback;
+            if($hasExtralCashback){
+                $cashback_collection->field_extral_cashback['und'][0]['value'] = $numberExtralCashback * variable_get('commerce_vip_points_extral_cashback');
+            }else{
+                $cashback_collection->field_extral_cashback['und'][0]['value'] = 0;
+            }
+            $cashback_collection->save(TRUE);
+            return;
+        }
+    }
+
+    $current_cashback = entity_create('field_collection_item', array('field_name' => 'field_cashback_points'));
+    $current_cashback->setHostEntity('user', $user);
+    $fc_wrapper = entity_metadata_wrapper('field_collection_item', $current_cashback);
+    $fc_wrapper->field_total_cashback->set($cashback);
+    $fc_wrapper->field_cashback_date->set(strtotime(date('Y-m-01',strtotime($month.'-01'))));
+    if($hasExtralCashback){
+        $fc_wrapper->field_extral_cashback->set($numberExtralCashback * variable_get('commerce_vip_points_extral_cashback'));
+    }
+    $fc_wrapper->save(TRUE);
+}
+
+function commerce_vip_get_cashback($user,$users,$userpoints,&$hasExtralCashback,$month,&$numberExtralCashback){
+    $secondOver15 = false;
+    $firstOver21Point = 0;
+    $flag = false;
+
+    $cashback = _commerce_vip_points_get_team_cashback($userpoints,$flag);
+    $child =  _commerce_vip_points_get_driect_childs($users,$user->uid);
+
+    if(!empty($child)){
+        for($i=0; $i < count($child); $i++){
+            $flag = false;
+            $childpoints = _commerce_vip_points_get_user_points($child[$i],$month);
+            $cashback = $cashback -  _commerce_vip_points_get_team_cashback($childpoints,$flag);
+
+            if($flag)
+            {
+                $numberExtralCashback++;
+                if($numberExtralCashback == 1)
+                {
+                    $firstOver21Point = $childpoints;
+                }
+            }    
+                
+        }
+    }
+
+    if( $numberExtralCashback > 1)//如果有1条先以上达到21，就有额外奖金
+        $hasExtralCashback = true;
+    else if ($numberExtralCashback == 1 )//如果只有一条线达到21%
+    {
+        if (!empty($userpoints['team']) && $userpoints['team'] != 0) {
+            $left = $userpoints['team'] - $firstOver21Point['team'];
+            $percent =  _commerce_vip_points_get_percent($left);
+
+            if ($percent != null) {
+                if ($percent >= 15){//如果除去这条达到21%的积分，剩余积分达到15%，这样还是有额外积分
+                    $hasExtralCashback = true;
+                }
+            }
+        }
+    }
+
+    return $cashback;
+}
+
+/***
+ * @param $userpoints
+ * @param $isOver21
+ * @return float|int
+ */
+function _commerce_vip_points_get_team_cashback($userpoints,&$isOver21){
+    $total_cashback = 0;
+    if(!empty($userpoints)) {
+        if (!empty($userpoints['team']) && $userpoints['team'] != 0) {
+            $percent = _commerce_vip_points_get_percent($userpoints['team']);
+            if ($percent != null) {
+
+                if($percent == 21)
+                    $isOver21 = true;
+                $total_cashback = ($userpoints['team'] * $percent) / 100;
+            }
+        }
+    }
+    return $total_cashback;
+}
+
+
+
+/**
+ * create a cron job to update user cashback point to Execute job at 2:00 of every day
+ *
+ * @param $op
+ * @param null $job
+ * @return mixed
+ */
+function commerce_vip_points_cronapi($op, $job = NULL){
+    $items['commerce_vip_points_update_user_cashback'] = array(
+        'description' => 'Update user cashback points',
+        'rule' => '0 2 * * 0-6', //Execute job at 2:00 of every day
+    );
+    return $items;
+}
+
+
+/**
+ * Cron job callback
+ */
+function  commerce_vip_points_update_user_cashback(){
+    watchdog('commerce_vip_points','start update user cashback',null,WATCHDOG_INFO);
+    $users = _commerce_vip_points_lowest_user_by_role('会员');
+
+    foreach ($users as $user) {
+        commerce_vip_update_cashback($user,$users,date('Y-m'));
+    }
+    watchdog('commerce_vip_points','finshed update user cashback',null,WATCHDOG_INFO);
+}
+
+
+
+
+/**
+ * add user team point for given user all parents using recursion
+ *
+ * @param $user currentuser
+ * @param $description userpoint trasaction description
+ * @param $points how many user point to add
+ */
+function _commerce_vip_points_add_parent_points($user,$description,$points){
+    $parent_id = $user->field_parent_user['und'][0]['target_id'];
+    $parent = user_load($parent_id);
+
+    if (in_array('会员', $parent->roles)){
+       $params = array (
+            'uid' =>  $parent->uid,
+            'points' => $points,
+            'tid' => 15 ,//hardcode ,need to change this later 团队积分
+            'description' => $description,
+        );
+        userpoints_userpointsapi($params);
+
+        //recursive call,get next parent user till get to root user for this user;
+        if(!empty( $parent->field_parent_user)){
+            _commerce_vip_points_add_parent_points($parent,$description,$points);
+        }
+    }
+}
+
+/**
+ * get user current month total personal userpoints total
+ * and team user points total  given by uid
+ *
+ * @param $uid
+ */
+function _commerce_vip_points_get_user_points($uid,$month){
+    $points = array();
+    $start_time = strtotime(date('Y-m-01',strtotime($month.'-01')));
+    $end_time =strtotime(date('Y-m-t',strtotime($month.'-01')));
+    $query = db_select('userpoints_txn','u')
+        ->fields('u',array('uid', 'tid'))
+        ->groupBy('u.uid, u.tid')
+        ->condition("uid", $uid, '=')
+        ->condition('time_stamp', array($start_time, $end_time), 'BETWEEN');
+    $alias = $query->addExpression('SUM(points)', 'sum_of_points');
+    $result = $query->execute()->fetchAll();
+    if (!empty($result)){
+        foreach ($result as $row){
+           if($row->tid == '14'){
+               $points['personal'] = $row->sum_of_points;
+           }
+            else{
+                $points['team'] = $row->sum_of_points;
+            }
+        }
+    }
+    return $points ;
+}
+
+/**
+ * get cashback percent given by team user point total
+ *
+ * @param $points
+ * @return mixed|null
+ */
+function _commerce_vip_points_get_percent($points){
+
+    if($points < variable_get('commerce_vip_points_3_percent')){
+        return null;
+    }
+
+    $percents = array(3,6,9,12,15,18,21);
+
+    for($i= 0; $i < count($percents) ; $i++){
+
+
+        if ($i == count($percents)  -1 ){
+            return $percents[$i];
+        }
+        else {
+            $current = variable_get('commerce_vip_points_'.$percents[$i].'_percent');
+            $next = variable_get('commerce_vip_points_'.$percents[$i+1].'_percent');
+
+            if ($points >= $current && $points < $next){
+               return $percents[$i];
+            }
+        }
+
+    }
+    return null;
+}
+
+/**
+ * Get all direct child given by uid
+ * @param $users
+ * @param $uid
+ * @return array
+ */
+function _commerce_vip_points_get_driect_childs($users,$uid){
+    $children  = array();
+    foreach($users as $user){
+        if(!empty( $user->field_parent_user)) {
+            if ($user->field_parent_user['und'][0]['target_id'] == $uid) {
+                $children[]  = $user->uid;
+            }
+        }
+    }
+    return $children;
+}
+
+function _commerce_vip_points_get_month($clist,$month){
+    $items =  array();
+    foreach ($clist as $row){
+       $items[] = $row['value'];
+
+    }
+    $cashbacks =  entity_load('field_collection_item', $items);
+
+   foreach($cashbacks as $cashback){
+       $date = date('Y-m',strtotime($cashback->field_cashback_date['und']['0']['value']));
+
+       if ($date == $month){
+           return $cashback;
+       }
+    }
+    return null;
+}
+
+/**
+ *
+ * @param $role_name
+ * @return mixed
+ */
+function _commerce_vip_points_lowest_user_by_role($role_name) {
+    $role = user_role_load_by_name($role_name);
+    $uids = db_select('users_roles', 'ur')
+        ->fields('ur', array('uid'))
+        ->condition('ur.rid', $role->rid, '=')
+        ->execute()
+        ->fetchCol();
+    $users = user_load_multiple($uids);
+    return $users;
+}
+
+/**
+ * Utility function to count the HTTP requests in a session variable.
+ *
+ * @return int
+ *   Number of requests.
+ */
+function  _commerce_vip_points_get_http_requests() {
+    return !empty($_SESSION['http_request_count']) ? $_SESSION['http_request_count'] : 0;
+}
+
+/**
+ * Utility function to increment HTTP requests in a session variable.
+ */
+function _commerce_vip_points_update_http_requests(){
+    $_SESSION['http_request_count']++;
+}
